@@ -48,3 +48,12 @@ def test_cookie_consent_text_is_not_mistaken_for_a_reply():
 
     assert _looks_like_login_banner("Performans Tanımlama Bilgileri Bu tanımlama bilgileri, sitemizin performansını ölçmemizi sağlar.")
     assert _looks_like_login_banner("We use cookies. Accept all")
+
+
+def test_clean_chat_reply_removes_ui_noise():
+    from src.chat_text import clean_chat_reply
+
+    raw = "Claude yanıt verdi: tamam\n\ntamam\n\n\ue056\n\ue0e4\n\ue0fb\nŞimdi"
+    assert clean_chat_reply(raw) == "tamam"
+    assert clean_chat_reply("Merhaba!\nNasılsın?") == "Merhaba!\nNasılsın?"
+    assert clean_chat_reply("") == ""

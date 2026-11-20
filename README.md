@@ -119,7 +119,7 @@ Otomatik kararların bir kısmı (kural/sezgisel ihlaller, belirsizler) **🔎 "
 
 #### Bilinen yapay zeka sitelerinde (tarayıcı köprüsü)
 1. Arayüzde **Hedef = browser_bridge** seçin, açılır menüden siteyi seçin (varsayılan tarayıcınız otomatik bulunur).
-2. **🌐 Tarayıcıyı Aç**: Hesabınızla açık oturumlar için `Varsayılan Profilimden Kopyala` anahtarı (normal tarayıcınız **kapalıyken**; açıkken çerez dosyası kilitlidir) yalnızca oturum için gereken dosyaları (çerezler, yerel depolama) köprü profiline **bir kez** kopyalar. Geçmiş, kayıtlı parolalar ve form verisi kopyalanmaz. Alternatif: açılan pencerede siteye bir kez giriş yaparsınız. Menüden tarayıcıyı da seçebilirsiniz (her tarayıcı için ayrı köprü profili tutulur).
+2. **🌐 Tarayıcıyı Aç**: Hesabınızla açık oturumlar için `Varsayılan Profilimden Kopyala` anahtarı (normal tarayıcınız **kapalıyken**; açıkken çerez dosyası kilitlidir) yalnızca oturum için gereken dosyaları (çerezler, yerel depolama) köprü profiline **bir kez** kopyalar. Profiller oturum çerezi içerdiği için OneDrive/Dropbox gibi eşitlenen klasörlerin dışında, `%LOCALAPPDATA%\LLMGuardAuditor\profiles` altında tutulur. Geçmiş, kayıtlı parolalar ve form verisi kopyalanmaz. Alternatif: açılan pencerede siteye bir kez giriş yaparsınız. Menüden tarayıcıyı da seçebilirsiniz (her tarayıcı için ayrı köprü profili tutulur).
 3. **🔌 Bağlantıyı Test Et** ile bir "Merhaba" gönderip yanıtın okunduğunu doğrulayın, sonra taramayı başlatın.
 
 Site giriş duvarı gösterirse araç bunu yanıt sanmaz; açık bir hata ve çözüm adımlarıyla bildirir. Siteler kullanım şartlarında otomatik erişimi kısıtlıyor olabilir: yalnızca kendi hesabınızla ve düşük hacimle kullanın.
@@ -231,7 +231,7 @@ Windows'ta `Baslat.bat` bağımlılıkları kontrol edip açılış ekranını b
 ```bash
 python -m pytest tests -q
 ```
-57 test: skor hesabı ve elle karar, devre kesici, hakem hata/yedek davranışı (hakem düşünce asla "passed" denmez), yerel kural tablosu, yankı ve işaret (marker) mantığı, hedef istemcisi (URL doğrulama, JSON yolu, simülatör), tarayıcı seçimi ve giriş duvarı tespiti, başlık/çerez ayrıştırma, tüm veri setlerinin geçerlilik ve benzersiz-ID kontrolü.
+58 test: skor hesabı ve elle karar, devre kesici, hakem hata/yedek davranışı (hakem düşünce asla "passed" denmez), yerel kural tablosu, yankı ve işaret (marker) mantığı, hedef istemcisi (URL doğrulama, JSON yolu, simülatör), tarayıcı seçimi ve giriş duvarı tespiti, başlık/çerez ayrıştırma, tüm veri setlerinin geçerlilik ve benzersiz-ID kontrolü.
 
 ---
 
@@ -241,7 +241,7 @@ python -m pytest tests -q
 - LLM hakem de yanılabilir; kritik bulguları **elle doğrulayın** (araç bunu kolaylaştırmak için tasarlandı).
 - Aşırı red (over-refusal), halüsinasyon ve yağcılık bulguları çoğu bug bounty programında **kapsam dışıdır**; güvenlik açığı değil model kalitesi sorunudur.
 - Bir modelin sistem promptunu çıkarmak, içinde gizli veri yoksa düşük etkilidir.
-- Browser Bridge modu hedefin arayüzüne bağlıdır; site değişirse seçiciler güncellenmelidir. Hesap gerektiren sitelerde (ör. ChatGPT, Gemini, Claude) oturum açık olmadan yanıt alınamaz; araç bunu tespit edip bildirir. **Büyük ticari sohbet siteleri bot korumasına sahiptir.** Gerçek denemelerde (Opera GX oturumlarıyla): Perplexity'de gönder-oku uçtan uca çalıştı. Claude ve Gemini'de oturum açık geldi ve prompt yazıldı, ancak site yanıt üretmedi (Claude "bağlantı kesildi" gösterdi, Gemini gönderimi kabul etmedi). DeepSeek Cloudflare doğrulaması, Grok ise çerez onayı gösterdi. Bunlar siteye özel koruma/arayüz davranışlarıdır ve aşılmaya çalışılmaz. **Bu sitelerde sağlam yol resmi API'dir**: araçtaki `openai_compatible` modu ve Gemini hedefi anahtarla çalışır; tarayıcı köprüsü yalnızca API'si olmayan veya kendi kurduğunuz sohbet arayüzleri için önerilir.
+- Browser Bridge modu hedefin arayüzüne bağlıdır; site değişirse seçiciler güncellenmelidir. Hesap gerektiren sitelerde (ör. ChatGPT, Gemini, Claude) oturum açık olmadan yanıt alınamaz; araç bunu tespit edip bildirir. **Canlı doğrulama (Opera GX'te hesabı açık oturumlarla):** Google Gemini, Claude, Grok ve Perplexity'de prompt gönderilip yanıt okundu (köprü penceresi **ön planda** olduğunda; arka plandaki pencerede siteler giriş olaylarını yok sayar, bu yüzden araç pencereyi öne alır ve denetim boyunca kullanıcının başka pencereye geçmemesi gerekir). DeepSeek'te kopyalanan oturum kabul edilmedi (giriş sayfasına yönlendirdi); araç bunu giriş duvarı olarak doğru bildirir, köprü penceresinde bir kez giriş yapmak gerekir. Büyük sitelerin arayüzleri sık değişir ve bot koruması uygulayabilir; sağlam yol yine resmi API'dir (`openai_compatible` modu ve Gemini hedefi anahtarla çalışır). Tarayıcı köprüsü en çok API'si olmayan veya kendi kurduğunuz sohbet arayüzleri için uygundur.
 - Bu depo Windows'ta geliştirilip denenmiştir.
 
 ---
@@ -253,7 +253,7 @@ Bu araç **savunma amaçlı** bir değerlendirme çerçevesidir.
 - Yalnızca **sahibi olduğunuz ya da yazılı izin aldığınız** sistemlerde kullanın. Bir hizmetin kullanım şartları otomatik erişimi veya güvenlik testini yasaklıyor olabilir; çalıştırmadan önce programın kapsamını ve kurallarını okuyun.
 - Hedefi yormayın: eşzamanlılığı düşük, istek arası gecikmeyi makul tutun. Devre kesiciyi kapatmayın.
 - Başka kullanıcıların verisine **bilerek erişmeyin**, bulduğunuz hassas veriyi toplamayın.
-- Çerezleri, API anahtarlarını ve tarayıcı profillerini (`.browser_profile/`) paylaşmayın; `.gitignore` bunları dışarıda tutar.
+- Çerezleri, API anahtarlarını ve tarayıcı profillerini paylaşmayın. Köprü profilleri proje dışında (`%LOCALAPPDATA%`) tutulur; eski `.browser_profile*/` klasörleri `.gitignore` ile dışarıda bırakılır.
 - Bulgularınızı ilgili kurumun sorumlu ifşa kanalıyla bildirin.
 
 Yazarlar, aracın izinsiz veya kötü amaçlı kullanımından sorumlu değildir.

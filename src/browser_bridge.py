@@ -1,4 +1,5 @@
 import asyncio
+import ctypes
 import json
 import os
 import re
@@ -11,7 +12,8 @@ from typing import Any, Dict, List, Optional
 import httpx
 import websockets
 
-from src.ai_sites import DEFAULT_SITE_URL
+from src.ai_sites import AI_SITES, DEFAULT_SITE_URL
+from src.chat_text import clean_chat_reply
 
 DEFAULT_CDP_PORT = 9222
 _BROWSER_LOCK = asyncio.Lock()
@@ -157,11 +159,16 @@ _SEED_PROFILE_ITEMS = (
 
 
 def profile_dir_for(browser_key: Optional[str]) -> Path:
-    """Her tarayıcı için ayrı köprü profili (farklı tarayıcıların profil verisi karışmasın)."""
-    root = Path(__file__).resolve().parent.parent
-    if browser_key in (None, "", "chrome"):
-        return root / ".browser_profile"
-    return root / f".browser_profile_{browser_key}"
+    """Her tarayıcı için ayrı köprü profili.
+
+    Oturum çerezleri içerdiği için profiller OneDrive/Dropbox gibi eşitlenen klasörlerin DIŞINDA,
+    %LOCALAPPDATA%\LLMGuardAuditor\profiles altında tutulur (yoksa proje klasörüne düşülür).
+    """
+    local = os.environ.get("LOCALAPPDATA")
+    key = browser_key or "chrome"
+    if local:
+        return Path(local) / "LLMGuardAuditor" / "profiles" / key
+    return Path(__file__).resolve().parent.parent / f".browser_profile_{key}"
 
 
 def installed_browsers() -> List[tuple]:
@@ -184,6 +191,39 @@ def _last_used_profile_name(user_data: Path) -> str:
         return str(state.get("profile", {}).get("last_used") or "Default")
     except Exception:
         return "Default"
+
+
+def _ai_site_domains() -> List[str]:
+    """Hazır yapay zeka sitelerinin kayıtlı alan adları + bunların bilinen betik/CDN alan adları."""
+    extra = {"anthropic.com", "openai.com", "x.ai"}
+    base = set()
+    for site in AI_SITES:
+        host = urllib.parse.urlparse(site.url).netloc.lower().removeprefix("www.")
+        base.add(".".join(host.split(".")[-2:]))
+    return sorted(base | extra)
+
+
+def allow_ai_sites_in_bridge_profile(profile_dir: Path) -> bool:
+    """Köprü profilinde (yalnızca bu kopyada) yapay zeka sitelerinde reklam/izleyici engelleyiciyi kapatır.
+
+    Opera/Opera GX'in yerleşik engelleyicisi, bu sitelerin uygulama betiklerini (ör. Claude'un s.js'i) engelleyip
+    sohbetin yanıt almasını bozabiliyor. Kullanıcının asıl tarayıcı profiline dokunulmaz.
+    """
+    prefs_path = profile_dir / "Default" / "Preferences"
+    try:
+        data = json.loads(prefs_path.read_text(encoding="utf-8"))
+        exceptions = (
+            data.setdefault("profile", {}).setdefault("content_settings", {}).setdefault("exceptions", {})
+        )
+        webkit_now = str(int((time.time() + 11644473600) * 1_000_000))
+        for key in ("content_filter_ads", "content_filter_trackers"):
+            table = exceptions.setdefault(key, {})
+            for domain in _ai_site_domains():
+                table[f"[*.]{domain},*"] = {"last_modified": webkit_now, "setting": 1}
+        prefs_path.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        return True
+    except Exception:
+        return False
 
 
 def seed_bridge_profile_from_default(exe_hint: Optional[str] = None, force: bool = False) -> str:
@@ -242,6 +282,7 @@ def seed_bridge_profile_from_default(exe_hint: Optional[str] = None, force: bool
     if not cookies_dest.is_file():
         hint = f" {info.label} açıkken çerez dosyası kilitli olabilir: tarayıcıyı tamamen kapatıp tekrar deneyin."
         return f"{info.label} profili kısmen kopyalandı, ancak çerez dosyası alınamadı.{hint}"
+    allow_ai_sites_in_bridge_profile(dest)
     note = f" (kopyalanamayan: {', '.join(problems)})" if problems else ""
     return f"{info.label} oturumları köprü profiline kopyalandı{note}."
 
@@ -255,6 +296,62 @@ def _find_browser_executable() -> Optional[str]:
 def _browser_label_for_exe(exe_path: str) -> str:
     b = _browser_for_exe(exe_path)
     return b.label if b else Path(exe_path).stem
+
+
+def _bridge_browser_pid(port: int) -> Optional[int]:
+    """CDP portunu dinleyen (köprü) tarayıcı ana sürecinin PID'i (yalnızca Windows)."""
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"(Get-NetTCPConnection -LocalPort {int(port)} -State Listen -ErrorAction SilentlyContinue "
+             "| Select-Object -First 1).OwningProcess"],
+            capture_output=True, text=True, errors="replace", timeout=15,
+        ).stdout.strip()
+        return int(out) if out.isdigit() else None
+    except Exception:
+        return None
+
+
+def focus_bridge_window(port: int = DEFAULT_CDP_PORT) -> bool:
+    """Köprü tarayıcısının penceresini geri yükleyip öne getirir (Windows).
+
+    Arka plandaki/küçültülmüş pencerelerde siteler giriş olaylarını yok sayar veya akışı keser; bu yüzden
+    denetim sırasında pencere ön planda olmalıdır. Başarılıysa True döner.
+    """
+    if os.name != "nt":
+        return False
+    pid = _bridge_browser_pid(port)
+    if not pid:
+        return False
+    try:
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        found: List[int] = []
+
+        def _cb(hwnd: int, _lp: int) -> bool:
+            if user32.IsWindowVisible(hwnd):
+                owner = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+                rect = wintypes.RECT()
+                user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                if owner.value == pid and (rect.right - rect.left) > 300 and user32.GetWindowTextLengthW(hwnd) > 0:
+                    found.append(hwnd)
+            return True
+
+        user32.EnumWindows(ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)(_cb), 0)
+        if not found:
+            return False
+        hwnd = found[0]
+        user32.ShowWindow(hwnd, 9)   # SW_RESTORE (küçültülmüşse geri getir)
+        user32.ShowWindow(hwnd, 3)   # SW_MAXIMIZE
+        # Windows'un ön plan kilidini aşmak için Alt tuşu basılıp bırakılır, sonra pencere öne alınır
+        user32.keybd_event(0x12, 0, 0, 0)
+        user32.keybd_event(0x12, 0, 2, 0)
+        user32.BringWindowToTop(hwnd)
+        return bool(user32.SetForegroundWindow(hwnd))
+    except Exception:
+        return False
 
 
 async def _get_cdp_tabs(port: int = DEFAULT_CDP_PORT) -> List[Dict[str, Any]]:
@@ -307,6 +404,7 @@ async def launch_browser_bridge(
         seed_message = ""
 
     bridge_profile.mkdir(parents=True, exist_ok=True)
+    allow_ai_sites_in_bridge_profile(bridge_profile)
     args = [
         exe_path,
         f"--remote-debugging-port={port}",
@@ -315,6 +413,7 @@ async def launch_browser_bridge(
         "--no-first-run",
         "--no-default-browser-check",
         "--new-window",
+        "--start-maximized",
         clean_url,
     ]
     subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -325,6 +424,7 @@ async def launch_browser_bridge(
             tabs = await _get_cdp_tabs(port)
             if tabs:
                 browser_name = _browser_label_for_exe(exe_path)
+                await asyncio.to_thread(focus_bridge_window, port)
                 base = f"{browser_name} tarayıcı köprüsü başlatıldı ({clean_url})."
                 return f"{base} {seed_message}".strip()
         except Exception:
@@ -522,6 +622,8 @@ _SITE_ADAPTERS = [
      "busy_text": "^(thinking|düşünüyor)", "new_chat": "https://chatgpt.com/"},
     {"host": "gemini.google.com", "reply": "model-response message-content, .model-response-text",
      "busy_text": "", "new_chat": "https://gemini.google.com/app"},
+    {"host": "grok.com", "reply": ".response-content-markdown",
+     "busy_text": "", "new_chat": "https://grok.com/"},
     {"host": "chat.deepseek.com", "reply": ".ds-markdown",
      "busy_text": "", "new_chat": "https://chat.deepseek.com/"},
 ]
@@ -669,7 +771,7 @@ _DETECT_BLOCKER_JS = """
         'oturum aç', 'oturum ac', 'üye ol', 'uye ol', 'kaydol', 'giriş yapın',
         'devam etmek için giriş', 'log in to continue', 'create an account'
     ];
-    let loginVisible = /(\\/login|\\/signin|\\/auth|\\/giris)/.test(url);
+    let loginVisible = /([/]login|[/]signin|[/]sign_in|[/]sign-in|[/]auth|[/]giris)/.test(url);
     if (!loginVisible) {
         const btnTexts = [...document.querySelectorAll('button, a, [role="button"], h1, h2, h3, p')]
             .filter(isVisible)
@@ -916,7 +1018,7 @@ async def query_browser_bridge(
                 except Exception:
                     pass
 
-                if blocker_info.get("cloudflare"):
+                if blocker_info.get("cloudflare") and not blocker_info.get("loginWall"):
                     raise RuntimeError(
                         "Sayfa Cloudflare doğrulamasıyla karşılaştı. Köprü penceresinde doğrulamayı "
                         "manuel tamamlayın ve denetimi tekrar çalıştırın."
@@ -929,6 +1031,7 @@ async def query_browser_bridge(
                         "Hedef sitenin sohbet ekranında olduğundan emin olun."
                     )
 
+                await asyncio.to_thread(focus_bridge_window, port)
                 # Sekme arka plandaysa (köprü penceresi odakta değilse) bazı siteler giriş olaylarını yok sayar
                 try:
                     await _cdp_call(ws, msg_id, "Page.bringToFront", {})
@@ -1003,6 +1106,9 @@ async def query_browser_bridge(
                         raise
                     except Exception:
                         pass
+
+                if final_reply:
+                    final_reply = clean_chat_reply(final_reply) or final_reply
 
                 # Okunan metin kısa bir "oturum açın" çağrısıysa bu sitenin yanıtı değil, giriş duvarıdır
                 if final_reply and _looks_like_login_banner(final_reply):
