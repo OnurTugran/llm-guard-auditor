@@ -1,7 +1,7 @@
 """Hedef/hakem ayarları, veri seti seçimi ve yeni senaryo ekleme."""
 from src.dataset_hub import SUITE_CATALOG, fetch_huggingface_dataset_rows, import_external_file, load_suite_by_filename
 from src.ai_sites import AI_SITES, CUSTOM_SITE_NAME, DEFAULT_SITE_URL, get_site, site_names
-from src.browser_bridge import describe_default_browser
+from src.browser_bridge import describe_default_browser, installed_browsers
 from src.models import JudgeConfig, TargetConfig, TestCase
 from src.ui.headers import parse_headers_or_cookie_input
 from src.ui.theme import THEME
@@ -13,6 +13,12 @@ import threading
 
 
 class ConfigMixin:
+    def _selected_browser_key(self) -> str:
+        """Arayüzde seçilen tarayıcının anahtarı ('auto' = varsayılan tarayıcı)."""
+        labels = getattr(self, "_browser_labels", {})
+        var = getattr(self, "browser_choice_var", None)
+        return labels.get(var.get(), "auto") if var is not None else "auto"
+
     def _on_site_selected(self, name: str) -> None:
         """Hazır site menüsünden seçim yapılınca adres kutusunu ve not satırını günceller."""
         site = get_site(name)
@@ -48,6 +54,17 @@ class ConfigMixin:
                 justify="left",
                 font=ctk.CTkFont(size=11),
             ).pack(anchor="w", padx=4)
+            self._browser_labels = {"Otomatik (varsayılan tarayıcı)": "auto"}
+            self._browser_labels.update({label: key for key, label in installed_browsers()})
+            self.browser_choice_var = ctk.StringVar(value="Otomatik (varsayılan tarayıcı)")
+            ctk.CTkOptionMenu(
+                self.target_config_frame,
+                values=list(self._browser_labels),
+                variable=self.browser_choice_var,
+                fg_color=THEME["bg_input"],
+                button_color=THEME["border"],
+                button_hover_color=THEME["accent_hover"],
+            ).pack(fill="x", padx=4, pady=(4, 0))
             self.site_var = ctk.StringVar(value=site_names()[0])
             ctk.CTkOptionMenu(
                 self.target_config_frame,
@@ -411,6 +428,7 @@ class ConfigMixin:
             t_cfg.browser_refresh_each_question = (
                 bool(self.browser_f5_switch.get()) if hasattr(self, "browser_f5_switch") else True
             )
+            t_cfg.browser_choice = self._selected_browser_key()
             t_cfg.browser_use_default_profile = (
                 bool(self.browser_default_profile_switch.get())
                 if hasattr(self, "browser_default_profile_switch")

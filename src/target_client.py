@@ -415,6 +415,7 @@ async def query_target(
             target_url=target_url,
             refresh_after=config.browser_refresh_each_question,
             use_default_profile=config.browser_use_default_profile,
+            browser_key=None if config.browser_choice == "auto" else config.browser_choice,
         )
         latency = (time.perf_counter() - start_time) * 1000
         return reply, round(latency, 2)

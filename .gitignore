@@ -1,5 +1,5 @@
 # Tarayıcı köprüsü profili: gerçek oturum çerezleri ve kişisel veri içerir
-.browser_profile/
+.browser_profile*/
 
 # Çalışma çıktıları ve gerçek hedeflerden alınmış yanıt dökümleri
 runs/

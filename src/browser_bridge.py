@@ -148,43 +148,102 @@ def _default_profile_dir(exe_path: str) -> Optional[Path]:
     return cand if cand.is_dir() else None
 
 
-def seed_bridge_profile_from_default(exe_hint: Optional[str] = None, force: bool = False) -> str:
-    """Varsayılan tarayıcı profilini (çerezler ve oturumlarla birlikte) köprü profiline kopyalar.
+# Oturum taşımak için gereken en az dosya/klasör (geçmiş, parola veritabanı, form verisi KOPYALANMAZ).
+_SEED_ROOT_FILES = ("Local State",)
+_SEED_PROFILE_ITEMS = (
+    "Network", "Local Storage", "Session Storage", "IndexedDB", "Preferences", "Secure Preferences",
+    "Cookies", "Extension Cookies",
+)
 
-    Chrome 136+ güvenlik kısıtı nedeniyle CDP, doğrudan varsayılan profil üzerinde çalıştırılamaz;
-    bu yüzden oturumları taşımak için tek seferlik profil kopyalama yapılır. Kilitli dosyalar atlanır
-    (tarayıcı açıksa çerezlerin bir kısmı kopyalanamayabilir; kopyalama öncesi tarayıcıyı kapatmak önerilir).
+
+def profile_dir_for(browser_key: Optional[str]) -> Path:
+    """Her tarayıcı için ayrı köprü profili (farklı tarayıcıların profil verisi karışmasın)."""
+    root = Path(__file__).resolve().parent.parent
+    if browser_key in (None, "", "chrome"):
+        return root / ".browser_profile"
+    return root / f".browser_profile_{browser_key}"
+
+
+def installed_browsers() -> List[tuple]:
+    """Kurulu desteklenen tarayıcılar: (anahtar, etiket)."""
+    return [(b.key, b.label) for b in _supported_browsers() if _first_existing(b.exe_paths)]
+
+
+def _exe_for_key(browser_key: Optional[str]) -> Optional[str]:
+    if not browser_key or browser_key == "auto":
+        return None
+    for b in _supported_browsers():
+        if b.key == browser_key:
+            return _first_existing(b.exe_paths)
+    return None
+
+
+def _last_used_profile_name(user_data: Path) -> str:
+    try:
+        state = json.loads((user_data / "Local State").read_text(encoding="utf-8"))
+        return str(state.get("profile", {}).get("last_used") or "Default")
+    except Exception:
+        return "Default"
+
+
+def seed_bridge_profile_from_default(exe_hint: Optional[str] = None, force: bool = False) -> str:
+    """Tarayıcının açık oturumlarını (çerez, yerel depolama) köprü profiline kopyalar.
+
+    Chrome 136+ güvenlik kısıtı nedeniyle CDP, doğrudan varsayılan profil üzerinde çalıştırılamaz; bu yüzden
+    oturumlar tek seferlik, YALNIZCA gerekli dosyalar kopyalanarak taşınır (geçmiş, kayıtlı parolalar ve form
+    verisi taşınmaz). Tarayıcı açıksa kilitli çerez dosyası kopyalanamayabilir; bu durumda açıkça bildirilir.
     """
+    import shutil
+
     exe = exe_hint or _find_default_browser_executable() or _find_browser_executable()
     if not exe:
-        raise RuntimeError("Sistemde Google Chrome veya Microsoft Edge bulunamadı.")
-    src = _default_profile_dir(exe)
-    if src is None:
-        raise RuntimeError("Varsayılan tarayıcının profil dizini bulunamadı.")
-    if ( _PROFILE_DIR / "Default" ).is_dir() and not force:
-        return "Köprü profili zaten hazır (tekrar kopyalanmadı)."
+        raise RuntimeError("Sistemde desteklenen bir tarayıcı (Chrome, Edge, Opera, Brave, Vivaldi) bulunamadı.")
+    info = _browser_for_exe(exe)
+    src_root = _default_profile_dir(exe)
+    if info is None or src_root is None:
+        raise RuntimeError("Seçilen tarayıcının profil dizini bulunamadı.")
+    dest = profile_dir_for(info.key)
+    cookies_dest = dest / "Default" / "Network" / "Cookies"
+    if cookies_dest.is_file() and not force:
+        return f"{info.label} köprü profili zaten hazır (tekrar kopyalanmadı)."
 
-    _PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    cache_dirs = [
-        "Cache", "Code Cache", "GPUCache", "Media Cache", "Service Worker",
-        "Crashpad", "component_crx_cache", "GrShaderCache", "ShaderCache",
-        "browser-metrics", "optimizationguide_hintcachestore",
-    ]
-    cmd = [
-        "robocopy", str(src), str(_PROFILE_DIR),
-        "/E", "/COPY:DAT", "/DCOPY:DAT", "/R:0", "/W:0",
-        "/NFL", "/NDL", "/NJH", "/NJS", "/NP",
-        "/XD", *cache_dirs,
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    if proc.returncode >= 8:
-        raise RuntimeError(f"Profil kopyalama başarısız (robocopy çıkış kodu {proc.returncode}).")
-    skipped_locked = proc.returncode in (1, 3, 5, 7)
-    suffix = (
-        " Kilitli dosyalar atlandı; çerezlerin tamamı taşınmadıysa tarayıcıyı kapatıp tekrar deneyin."
-        if skipped_locked else ""
-    )
-    return f"Varsayılan profil köprüye kopyalandı ({src}).{suffix}"
+    dest.mkdir(parents=True, exist_ok=True)
+    src_profile = src_root / _last_used_profile_name(src_root)
+    dest_profile = dest / "Default"
+    dest_profile.mkdir(parents=True, exist_ok=True)
+    problems = []
+
+    for name in _SEED_ROOT_FILES:
+        try:
+            if (src_root / name).is_file():
+                shutil.copy2(src_root / name, dest / name)
+        except OSError as exc:
+            problems.append(f"{name}: {exc.strerror or exc}")
+
+    for name in _SEED_PROFILE_ITEMS:
+        s_item = src_profile / name
+        if not s_item.exists():
+            continue
+        try:
+            if s_item.is_dir():
+                proc = subprocess.run(
+                    ["robocopy", str(s_item), str(dest_profile / name), "/E", "/R:0", "/W:0",
+                     "/NFL", "/NDL", "/NJH", "/NJS", "/NP"],
+                    capture_output=True, text=True, errors="replace", timeout=300,
+                )
+                if proc.returncode >= 8:
+                    problems.append(f"{name} (robocopy {proc.returncode})")
+            else:
+                (dest_profile / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(s_item, dest_profile / name)
+        except OSError as exc:
+            problems.append(f"{name}: {exc.strerror or exc}")
+
+    if not cookies_dest.is_file():
+        hint = f" {info.label} açıkken çerez dosyası kilitli olabilir: tarayıcıyı tamamen kapatıp tekrar deneyin."
+        return f"{info.label} profili kısmen kopyalandı, ancak çerez dosyası alınamadı.{hint}"
+    note = f" (kopyalanamayan: {', '.join(problems)})" if problems else ""
+    return f"{info.label} oturumları köprü profiline kopyalandı{note}."
 
 
 def _find_browser_executable() -> Optional[str]:
@@ -212,6 +271,7 @@ async def launch_browser_bridge(
     port: int = DEFAULT_CDP_PORT,
     use_default_profile: bool = False,
     force_seed: bool = False,
+    browser_key: Optional[str] = None,
 ) -> str:
     """Gerçek Chrome/Edge tarayıcısını kalıcı profil ve CDP köprüsüyle başlatır veya açık sekmeyi odaklanır.
 
@@ -235,21 +295,23 @@ async def launch_browser_bridge(
     except Exception:
         pass
 
-    exe_path = _find_default_browser_executable() or _find_browser_executable()
+    exe_path = _exe_for_key(browser_key) or _find_default_browser_executable() or _find_browser_executable()
     if not exe_path:
-        raise RuntimeError("Sistemde Google Chrome veya Microsoft Edge bulunamadı.")
+        raise RuntimeError("Sistemde desteklenen bir tarayıcı (Chrome, Edge, Opera, Brave, Vivaldi) bulunamadı.")
+    bridge_info = _browser_for_exe(exe_path)
+    bridge_profile = profile_dir_for(bridge_info.key if bridge_info else None)
 
     if use_default_profile:
         seed_message = await asyncio.to_thread(seed_bridge_profile_from_default, exe_path, force_seed)
     else:
         seed_message = ""
 
-    _PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    bridge_profile.mkdir(parents=True, exist_ok=True)
     args = [
         exe_path,
         f"--remote-debugging-port={port}",
         "--remote-allow-origins=*",
-        f"--user-data-dir={_PROFILE_DIR}",
+        f"--user-data-dir={bridge_profile}",
         "--no-first-run",
         "--no-default-browser-check",
         "--new-window",
@@ -349,6 +411,14 @@ def _build_send_js(prompt: str) -> str:
     window.__llmGuardOldCounts = __llmGuardCountTexts();
     window.__llmGuardPromptNorm = norm(promptText);
     window.__llmGuardPromptLoose = __llmGuardLoose(promptText);
+    // Bilinen sitelerde: gönderimden önceki asistan mesajı sayısı (yalnızca YENİ mesaj yanıt sayılır)
+    {_ADAPTERS_JS}
+    {{
+        const __a = __ADAPTERS.find((x) => location.hostname === x.host || location.hostname.endsWith('.' + x.host));
+        window.__llmGuardAdapterBase = __a
+            ? [...document.querySelectorAll(__a.reply)].filter((e) => (e.innerText || '').trim()).length
+            : 0;
+    }}
 
     // 2. Görünür sohbet giriş alanını bul
     const isVisible = (el) => {{
@@ -386,9 +456,10 @@ def _build_send_js(prompt: str) -> str:
         inputEl.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: promptText }}));
         inputEl.dispatchEvent(new Event('change', {{ bubbles: true }}));
     }} else {{
-        inputEl.innerHTML = '';
+        // innerHTML/textContent ile temizleme Trusted Types (Gemini) ve editör çerçeveleri (Quill/ProseMirror) için
+        // güvenli değildir: içeriği seçip insertText ile değiştir (editörün kendi durumu bozulmaz).
+        document.execCommand('selectAll', false, null);
         document.execCommand('insertText', false, promptText);
-        inputEl.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: promptText }}));
     }}
 
     // 4. Gönder butonuna tıkla veya Enter tuşuna bas
@@ -438,8 +509,43 @@ def _build_send_js(prompt: str) -> str:
 """
 
 
+
+# Bilinen sitelere özel yanıt/yeni sohbet kuralları. Genel (metin farkı) yöntem sitelerde sayfa iskeletini
+# yanıt sanabildiği için, bu sitelerde asistan mesaj düğümü doğrudan seçilir.
+#   reply    : asistan mesajı düğümlerinin CSS seçicisi (son eşleşen yanıttır)
+#   busy_text: yanıt metni bu kalıpla başlıyorsa model hâlâ düşünüyor demektir (henüz yanıt değil)
+#   new_chat : temiz sohbet için gidilecek adres (her test bağımsız olsun diye)
+_SITE_ADAPTERS = [
+    {"host": "claude.ai", "reply": '[data-testid="assistant-message"]',
+     "busy_text": "^(düşünüyor|thinking|çalışıyor|working|düşünce)", "new_chat": "https://claude.ai/new"},
+    {"host": "chatgpt.com", "reply": '[data-message-author-role="assistant"]',
+     "busy_text": "^(thinking|düşünüyor)", "new_chat": "https://chatgpt.com/"},
+    {"host": "gemini.google.com", "reply": "model-response message-content, .model-response-text",
+     "busy_text": "", "new_chat": "https://gemini.google.com/app"},
+    {"host": "chat.deepseek.com", "reply": ".ds-markdown",
+     "busy_text": "", "new_chat": "https://chat.deepseek.com/"},
+]
+_ADAPTERS_JS = "const __ADAPTERS = " + json.dumps(_SITE_ADAPTERS, ensure_ascii=False) + ";\n"
+
+_ADAPTER_POLL_JS = """
+    const __adapter = __ADAPTERS.find((a) => location.hostname === a.host || location.hostname.endsWith('.' + a.host));
+    if (__adapter) {
+        const __els = [...document.querySelectorAll(__adapter.reply)].filter((e) => (e.innerText || '').trim());
+        const __last = __els[__els.length - 1];
+        const __txt = __last ? (__last.innerText || '').trim() : '';
+        const __busyRe = __adapter.busy_text ? new RegExp(__adapter.busy_text, 'i') : null;
+        const __thinking = Boolean(__busyRe && __busyRe.test(__txt));
+        const __stopBtn = Boolean(document.querySelector(
+            'button[aria-label*="Stop" i], button[aria-label*="Durdur" i], button[aria-label*="Yanıtı durdur" i], [data-is-streaming="true"]'
+        ));
+        const __isNew = __els.length > (window.__llmGuardAdapterBase || 0);
+        return { reply: (__thinking || !__isNew) ? '' : __txt, isStreaming: __thinking || __stopBtn, newNodesCount: __els.length };
+    }
+"""
+
 _POLL_DOM_JS = """
 (() => {
+    """ + _ADAPTERS_JS + _ADAPTER_POLL_JS + """
     const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
     const promptNorm = window.__llmGuardPromptNorm || '';
 """ + _LOOSE_JS + _COUNT_TEXTS_JS + """
@@ -603,16 +709,23 @@ _LOGIN_BANNER_PHRASES = (
     "oturum açın", "oturum ac", "giriş yapın", "giris yapin", "giriş yap", "kaydolun", "hesap oluşturun",
     "sign in", "log in", "login to", "sign up", "create an account", "to continue", "devam etmek için",
     "geçmişinizi kaydetmek", "save your history",
+    "tanımlama bilgileri", "çerez", "cookie", "accept all", "tümünü kabul",  # çerez onayı penceresi de yanıt değildir
 )
 
 
 def _looks_like_login_banner(text: str) -> bool:
     """Okunan 'yanıt' aslında kısa bir oturum açma/kayıt çağrısı mı (gerçek bir cevap değil)?"""
     t = (text or "").strip().lower()
-    return 0 < len(t) <= 200 and any(p in t for p in _LOGIN_BANNER_PHRASES)
+    return 0 < len(t) <= 400 and any(p in t for p in _LOGIN_BANNER_PHRASES)
 
 _SMART_CLEAR_CHAT_JS = """
 (() => {
+    """ + _ADAPTERS_JS + """
+    const __adapterNew = __ADAPTERS.find((a) => location.hostname === a.host || location.hostname.endsWith('.' + a.host));
+    if (__adapterNew && __adapterNew.new_chat) {
+        setTimeout(() => { try { window.location.href = __adapterNew.new_chat; } catch (e) {} }, 50);
+        return { mode: 'async_reload' };
+    }
     // 1. Öncelikle sayfa içindeki 'Sohbeti Temizle' / 'Yeni Sohbet' / 'New Chat' butonunu bul ve tıkla (Cloudflare/F5 takılmasını %100 önler)
     const btns = [...document.querySelectorAll('button, a, [role="button"]')];
     for (const b of btns) {
@@ -650,6 +763,68 @@ _SMART_CLEAR_CHAT_JS = """
 """
 
 
+# Metin giriş kutusunda hâlâ gönderilmemiş prompt var mı ve gönder düğmesi nerede? (güvenilir "gerçek" tıklama için)
+_PENDING_JS = r"""
+(() => {
+    const snippet = (window.__llmGuardPromptNorm || '').slice(0, 20).toLowerCase();
+    const isVisible = (el) => {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        const st = window.getComputedStyle(el);
+        return r.width > 20 && r.height > 10 && st.visibility !== 'hidden' && st.display !== 'none';
+    };
+    const inputs = [
+        ...document.querySelectorAll('textarea:not([disabled])'),
+        ...document.querySelectorAll('[contenteditable="true"]'),
+        ...document.querySelectorAll('input[type="text"]:not([disabled])')
+    ].filter(isVisible);
+    const text = inputs.map((e) => (e.value || e.innerText || '')).join(' ').replace(/\s+/g, ' ').trim().toLowerCase();
+    const pending = Boolean(snippet) && text.includes(snippet);
+    let btn = null;
+    const sels = ['#chat-submit', 'button.send-button', 'button[type="submit"]', 'button[aria-label*="Send" i]',
+                  'button[aria-label*="Gönder" i]', 'button[data-testid*="send" i]'];
+    for (const sel of sels) {
+        for (const b of document.querySelectorAll(sel)) {
+            const r = b.getBoundingClientRect();
+            if (isVisible(b) && !b.disabled && b.getAttribute('aria-disabled') !== 'true') {
+                btn = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+                break;
+            }
+        }
+        if (btn) break;
+    }
+    return { pending, btn };
+})()
+"""
+
+
+async def _submit_if_pending(ws: Any, msg_id: int) -> int:
+    """Bazı siteler (ör. Gemini) betikle üretilen (güvenilmeyen) tıklamaları yok sayar. Prompt gönderilmeden
+    kutuda kaldıysa önce gerçek Enter tuşu, olmazsa gerçek fare tıklaması gönderir."""
+    for attempt in ("enter", "mouse"):
+        await asyncio.sleep(1.2)
+        res = await _cdp_call(ws, msg_id, "Runtime.evaluate", {"expression": _PENDING_JS, "returnByValue": True})
+        msg_id += 1
+        info = res.get("result", {}).get("value", {})
+        if not isinstance(info, dict) or not info.get("pending"):
+            return msg_id
+        if attempt == "enter":
+            for typ in ("keyDown", "keyUp"):
+                params = {"type": typ, "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13}
+                if typ == "keyDown":
+                    params["text"] = "\r"
+                await _cdp_call(ws, msg_id, "Input.dispatchKeyEvent", params)
+                msg_id += 1
+        else:
+            btn = info.get("btn")
+            if isinstance(btn, dict):
+                for typ in ("mouseMoved", "mousePressed", "mouseReleased"):
+                    params = {"type": typ, "x": btn["x"], "y": btn["y"], "button": "left", "clickCount": 1}
+                    await _cdp_call(ws, msg_id, "Input.dispatchMouseEvent", params)
+                    msg_id += 1
+    return msg_id
+
+
 async def query_browser_bridge(
     prompt: str,
     target_url: str = DEFAULT_SITE_URL,
@@ -657,6 +832,7 @@ async def query_browser_bridge(
     timeout_sec: float = 55.0,
     refresh_after: bool = True,
     use_default_profile: bool = False,
+    browser_key: Optional[str] = None,
 ) -> str:
     """Açık Chrome/Edge sekmesine CDP üzerinden bağlanır, soruyu yazar, cevabı okur ve sohbeti temizler."""
     async with _BROWSER_LOCK:
@@ -667,7 +843,9 @@ async def query_browser_bridge(
         try:
             tabs = await _get_cdp_tabs(port)
         except Exception:
-            await launch_browser_bridge(clean_url, port, use_default_profile=use_default_profile)
+            await launch_browser_bridge(
+                clean_url, port, use_default_profile=use_default_profile, browser_key=browser_key
+            )
             await asyncio.sleep(2.5)
             tabs = await _get_cdp_tabs(port)
 
@@ -751,6 +929,13 @@ async def query_browser_bridge(
                         "Hedef sitenin sohbet ekranında olduğundan emin olun."
                     )
 
+                # Sekme arka plandaysa (köprü penceresi odakta değilse) bazı siteler giriş olaylarını yok sayar
+                try:
+                    await _cdp_call(ws, msg_id, "Page.bringToFront", {})
+                except Exception:
+                    pass
+                msg_id += 1
+
                 send_res = await _cdp_call(
                     ws,
                     msg_id,
@@ -762,6 +947,8 @@ async def query_browser_bridge(
                 val = send_res.get("result", {}).get("value", {})
                 if isinstance(val, dict) and not val.get("ok", False):
                     raise RuntimeError(str(val.get("error", "Sohbet kutusuna yazılamadı.")))
+
+                msg_id = await _submit_if_pending(ws, msg_id)
 
                 deadline = time.perf_counter() + timeout_sec
                 last_dom_reply = ""

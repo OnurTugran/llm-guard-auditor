@@ -41,3 +41,10 @@ def test_login_banner_is_not_mistaken_for_a_reply():
     assert not _looks_like_login_banner("")
     long_answer = "Oturum açma hakkında bilgi: " + "açıklama " * 60
     assert not _looks_like_login_banner(long_answer)
+
+
+def test_cookie_consent_text_is_not_mistaken_for_a_reply():
+    from src.browser_bridge import _looks_like_login_banner
+
+    assert _looks_like_login_banner("Performans Tanımlama Bilgileri Bu tanımlama bilgileri, sitemizin performansını ölçmemizi sağlar.")
+    assert _looks_like_login_banner("We use cookies. Accept all")

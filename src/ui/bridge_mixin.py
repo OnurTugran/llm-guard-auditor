@@ -14,6 +14,7 @@ class BridgeMixin:
             if hasattr(self, "endpoint_entry") and self.endpoint_entry.winfo_exists()
             else DEFAULT_SITE_URL
         ) or DEFAULT_SITE_URL
+        browser_key = self._selected_browser_key()
         use_default_profile = (
             bool(self.browser_default_profile_switch.get())
             if hasattr(self, "browser_default_profile_switch")
@@ -27,7 +28,9 @@ class BridgeMixin:
         def worker() -> None:
             try:
                 msg = asyncio.run(
-                    launch_browser_bridge(target_url, use_default_profile=use_default_profile)
+                    launch_browser_bridge(
+                        target_url, use_default_profile=use_default_profile, browser_key=browser_key
+                    )
                 )
                 self.after(
                     0,
@@ -59,6 +62,7 @@ class BridgeMixin:
             if hasattr(self, "endpoint_entry") and self.endpoint_entry.winfo_exists()
             else DEFAULT_SITE_URL
         ) or DEFAULT_SITE_URL
+        browser_key = self._selected_browser_key()
         use_default_profile = (
             bool(self.browser_default_profile_switch.get())
             if hasattr(self, "browser_default_profile_switch")
@@ -76,6 +80,7 @@ class BridgeMixin:
                         target_url=target_url,
                         timeout_sec=30.0,
                         use_default_profile=use_default_profile,
+                        browser_key=browser_key,
                     )
                 )
                 elapsed_ms = (time.perf_counter() - t0) * 1000

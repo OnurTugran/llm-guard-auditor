@@ -39,6 +39,7 @@ class TargetConfig(BaseModel):
     sandbox_strict_guardrails: bool = False
     browser_refresh_each_question: bool = True
     browser_use_default_profile: bool = False
+    browser_choice: str = "auto"  # 'auto' = varsayılan tarayıcı, ya da tarayıcı anahtarı (chrome, opera_gx, ...)
 
 
 class JudgeConfig(BaseModel):
