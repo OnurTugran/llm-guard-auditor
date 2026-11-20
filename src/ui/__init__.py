@@ -1,0 +1,1 @@
+"""Masaüstü arayüzünün bileşenleri."""

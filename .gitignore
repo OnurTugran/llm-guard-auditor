@@ -1,0 +1,26 @@
+# Tarayıcı köprüsü profili: gerçek oturum çerezleri ve kişisel veri içerir
+.browser_profile/
+
+# Çalışma çıktıları ve gerçek hedeflerden alınmış yanıt dökümleri
+runs/
+*_owasp_sonuclari*.json
+*_results.json
+*_results.jsonl
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Makineye özgü derleme çıktıları (build_desktop_exe.py ile yeniden üretilir)
+*.exe
+NativeLauncher.cs
+build/
+dist/
+*.spec
+
+# Gizli bilgiler
+.env
+*.key
